@@ -131,6 +131,15 @@ my $package = package_at( $elem, packages_in($ppi) );
 The package that an element is in: that of the block of a `package NAME { }`
 around it, or else that of the last `package NAME;` before it, or `main`.
 
+# BUGS
+
+Please report any bugs or feature requests on the bugtracker website
+[https://github.com/teodesian/perl-critic-policy-prohibitmutatinglistfunctionsstricter/issues](https://github.com/teodesian/perl-critic-policy-prohibitmutatinglistfunctionsstricter/issues)
+
+When submitting a bug or request, please include a test-file or a
+patch to an existing test-file that illustrates the bug or desired
+feature.
+
 # AUTHORS
 
 Current Maintainers:
