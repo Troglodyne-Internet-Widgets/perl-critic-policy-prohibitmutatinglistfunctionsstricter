@@ -181,6 +181,33 @@ $check_table->(
     'in the list of a nested map'               => [ 1, $TRIM . q{my @t = map { my @z = map { $_ } trim(); $_ } @lines;} ],
 );
 
+# map EXPR, LIST and grep EXPR, LIST alias $_ as the block forms do.  On perl
+# 5.44 each case with 1 changes @y, and each with 0 leaves it as it was.
+$check_table->(
+    'map EXPR and grep EXPR',
+    'a sub that changes $_, in map EXPR'  => [ 1, $TRIM . q{my @z = map trim(), @y;} ],
+    'a sub that changes $_, in grep EXPR' => [ 1, $TRIM . q{my @z = grep trim(), @y;} ],
+    'map(EXPR, LIST)'                     => [ 1, $TRIM . q{my @z = map(trim(), @y);} ],
+    'a substitution in map EXPR'          => [ 1, q{my @z = map s/x//, @y;} ],
+    'chomp in map EXPR'                   => [ 1, q{my @z = map chomp, @y;} ],
+    's///r in map EXPR'                   => [ 0, q{my @z = map s/x//r, @y;} ],
+    'a sub that only reads $_'            => [ 0, q{sub has_x { return /x/ } my @z = grep has_x(), @y;} ],
+    'a sub in the list, outside'          => [ 0, $TRIM . q{my @z = map lc, trim();} ],
+);
+
+# Each is reported once, on the line of the list function whose list perl
+# 5.44 changes.
+my %EXPR_LINES = (
+    'nested in a map block'            => [ [2], $TRIM . qq{my \@r = map {\n    my \@z = map trim(), \@y;\n    \$_;\n} \@l;\n} ],
+    'in a sub that a map block calls'  => [ [2], $TRIM . qq{sub t {\n    my \@z = map trim(), \@y;\n    return 1;\n}\nmy \@r = map { t() } \@l;\n} ],
+    'a substitution, in a sub called'  => [ [2], qq{sub u {\n    my \@z = map s/x//, \@_;\n    return 1;\n}\nmy \@r = map { u() } \@l;\n} ],
+    'in the list of a nested map EXPR' => [ [1], $TRIM . qq{my \@r = map {\n    my \@z = map \$_, trim();\n    \$_;\n} \@l;\n} ],
+);
+foreach my $case ( sort keys %EXPR_LINES ) {
+    my ( $lines, $source ) = @{ $EXPR_LINES{$case} };
+    is_deeply( [ map { $_->line_number } $critic->critique( \$source ) ], $lines, "map EXPR, reported where its list changes: $case" ) or diag $source;
+}
+
 # report_unresolved_calls and report_postfix_for_calls, which are off unless a
 # profile turns them on.
 my $ALIASED_PROFILE = "[ControlStructures::ProhibitMutatingListFunctionsStricter]\nreport_unresolved_calls = 1\nreport_postfix_for_calls = 1\n";

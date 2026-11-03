@@ -11,6 +11,7 @@ use List::Util                 qw{any first};
 use Scalar::Util               ();
 use Perl::Critic::Distribution ();
 use Perl::Critic::Document     ();
+use PPI::Statement             ();
 use Perl::Critic::Utils        qw{ :severities is_function_call is_method_call is_perl_builtin first_arg };
 
 use parent qw{Perl::Critic::Policy::ControlStructures::ProhibitMutatingListFunctions};
@@ -45,6 +46,13 @@ One addition: C<chomp;> and C<chop;>, written with the semicolon that ends their
 statement.  The core policy takes that semicolon for an argument, and misses
 them.
 
+And one more: C<map EXPR, LIST> and C<grep EXPR, LIST> alias C<$_> as the
+block forms do, so their expression counts as a block, for every rule here.
+The core policy reads only the block:
+
+    my @z = map s/x//, @y;    # reported
+    my @z = map trim(), @y;   # reported, as a call of a sub that changes $_
+
 =head2 A sub that changes $_
 
 A sub whose body changes C<$_>, by the definition above, and does not make
@@ -57,7 +65,8 @@ caller's:
 statement before a postfix C<for>, but not the list of either, which perl
 evaluates before it aliases C<$_>,
 
-=item * the block of a list function inside the sub,
+=item * the block of a list function inside the sub, and the expression of a
+C<map EXPR> or C<grep EXPR>, but not its list,
 
 =item * an inner sub, named or anonymous, with or without a signature, a
 prototype or attributes.
@@ -173,8 +182,6 @@ The core's C<list_funcs> names only the full names of the functions of CPAN,
 and code calls them by the name that it imported.  With
 C<report_unresolved_calls>, every report of this policy uses this longer list,
 so a change to C<$_> in the block of a bare C<any> is reported too.
-C<map EXPR, LIST> and C<grep EXPR, LIST> alias C<$_> as the block forms do, so
-their expression counts as a block.
 
 These do not alias C<$_>, and are not list functions here: C<sort> and
 C<reduce>, which set C<$a> and C<$b>; C<apply> of List::MoreUtils, and
@@ -389,23 +396,27 @@ sub violates {
     my $arg = first_arg($elem) or return;
 
     my @aliased;
+    my %expression;
     if ( $arg->isa('PPI::Structure::Block') ) {
         return $self->violation( $DESC, $EXPL, $elem ) if chops_topic($arg) || ( !$self->{_all_list_funcs}{$elem} && $core_side_effect->( $arg, $doc ) );
         @aliased = aliased_statements($arg);
     }
-    elsif ( $self->{_report_unresolved_calls} && $EXPR_FORM{$elem} ) {
-        for ( my $part = $arg; $part && !( $part->isa('PPI::Token::Operator') && $part->content eq q{,} ); $part = $part->snext_sibling ) {
-            push @aliased, $part;
-        }
+    elsif ( @aliased = expression_of($elem) ) {
+        my $copy = PPI::Statement->new;
+        $copy->add_element( $_->clone ) for @aliased;
+        return $self->violation( $DESC, $EXPL, $elem ) if mutates_topic( $copy, $doc );
+        %expression = map { Scalar::Util::refaddr($_) => 1 } @aliased;
     }
     else {
         return;
     }
 
+    # An expression's owner is its statement, in which topic_owned_in also
+    # finds the expression itself.
     my $known = $self->known_subs($doc);
     my $owner = $arg->isa('PPI::Structure::Block') ? $arg : $elem->statement;
-    my @owned = topic_owned_in( $owner, $self->{_block_funcs} );
-    my %owned = map { Scalar::Util::refaddr($_) => 1 } @owned;
+    my @owned = grep { !$expression{ Scalar::Util::refaddr($_) } } topic_owned_in( $owner, $self->{_block_funcs} );
+    my %owned = map  { Scalar::Util::refaddr($_) => 1 } @owned;
     foreach my $word ( map { $_->isa('PPI::Node') ? @{ $_->find('PPI::Token::Word') || [] } : $_ } @aliased ) {
         next                                                  if !$word->isa('PPI::Token::Word') || !is_function_call($word) || is_inside( $word, \%owned );
         return $self->violation( $DESC_CALLED, $EXPL, $elem ) if calls_sub_in( $word, $word->content, $known->{mutating}, $known->{packages} );
@@ -659,10 +670,11 @@ sub own_topic_removed {
 
 The parts of a node where C<$_> is not the caller's: the blocks of a
 C<foreach> with no loop variable, the part of a statement before a postfix
-C<for>, the block of a list function, and an inner sub.  The list of a loop is
-the caller's, because perl evaluates it before it aliases C<$_>.  The list
-functions are those of the core's C<list_funcs> unless C<\%list_functions>
-names others.
+C<for>, the block of a list function, the expression of C<map EXPR, LIST> and
+C<grep EXPR, LIST>, and an inner sub.  The list of a loop or of a list
+function is the caller's, because perl evaluates it before it aliases C<$_>.
+The list functions are those of the core's C<list_funcs> unless
+C<\%list_functions> names others.
 
 =cut
 
@@ -688,9 +700,34 @@ sub topic_owned_in {
         if ( $word->content eq 'sub' ) {
             $next = $next->snext_sibling while $next && is_sub_header($next);
         }
-        push @owned, $next if $next && $next->isa('PPI::Structure::Block') && ( $word->content eq 'sub' || $list_functions->{ $word->content } );
+        push @owned, $next                if $next && $next->isa('PPI::Structure::Block') && ( $word->content eq 'sub' || $list_functions->{ $word->content } );
+        push @owned, expression_of($word) if $list_functions->{ $word->content };
     }
     return @owned;
+}
+
+=head3 expression_of
+
+    my @parts = expression_of($elem);
+
+The parts of the expression of C<map EXPR, LIST> or C<grep EXPR, LIST>, when
+C<$elem> is its C<map> or C<grep>, up to the comma before the list.  None for
+the block form, or for any other word.
+
+=cut
+
+sub expression_of {
+    my ($elem) = @_;
+
+    return if !$EXPR_FORM{ $elem->content } || !is_function_call($elem);
+    my $arg = first_arg($elem);
+    return if !$arg || $arg->isa('PPI::Structure::Block');
+
+    my @parts;
+    for ( my $part = $arg; $part && !( $part->isa('PPI::Token::Operator') && $part->content eq q{,} ); $part = $part->snext_sibling ) {
+        push @parts, $part;
+    }
+    return @parts;
 }
 
 =head3 is_sub_header
