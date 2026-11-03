@@ -4,7 +4,7 @@ Perl::Critic::Policy::ControlStructures::ProhibitMutatingListFunctionsStricter -
 
 # VERSION
 
-version 0.002
+version 0.003
 
 # DESCRIPTION
 
@@ -38,16 +38,28 @@ One addition: `chomp;` and `chop;`, written with the semicolon that ends their
 statement.  The core policy takes that semicolon for an argument, and misses
 them.
 
+And one more: `map EXPR, LIST` and `grep EXPR, LIST` alias `$_` as the
+block forms do, so their expression counts as a block, for every rule here.
+The core policy reads only the block:
+
+```perl
+my @z = map s/x//, @y;    # reported
+my @z = map trim(), @y;   # reported, as a call of a sub that changes $_
+```
+
 ## A sub that changes $\_
 
 A sub whose body changes `$_`, by the definition above, and does not make
 `$_` its own first.  These do not count, because there `$_` is not the
 caller's:
 
-- the body of a `foreach` with no loop variable, and a statement with a
-postfix `for`,
-- the block of a list function inside the sub,
-- an inner sub, named or anonymous.
+- the body of a `foreach` with no loop variable, and the part of a
+statement before a postfix `for`, but not the list of either, which perl
+evaluates before it aliases `$_`,
+- the block of a list function inside the sub, and the expression of a
+`map EXPR` or `grep EXPR`, but not its list,
+- an inner sub, named or anonymous, with or without a signature, a
+prototype or attributes.
 
 A sub that declares `local $_` anywhere does not count at all.
 
@@ -59,6 +71,18 @@ known.  A method call is left alone, because the method that runs can be another
 sub of the same name.
 
 Only one call deep: a sub that calls a sub that changes `$_` is not reported.
+
+The same places count in the block that calls it.  A call there does not
+count, because it changes another list, or runs later, or not at all:
+
+```perl
+my @t = map { my @z = map { trim(); $_ } @y; $_ } @lines;  # the inner map only
+my @t = map { for (@y) { trim() } $_ } @lines;             # OK! changes @y
+my @t = map { my $c = sub ($y) { trim() }; $_ } @lines;    # OK! not called here
+```
+
+A `for my $x` loop names its own variable and leaves `$_` as the element, so
+a call in its body still counts.
 
 ## A local $\_ in the block
 
@@ -160,8 +184,6 @@ The core's `list_funcs` names only the full names of the functions of CPAN,
 and code calls them by the name that it imported.  With
 `report_unresolved_calls`, every report of this policy uses this longer list,
 so a change to `$_` in the block of a bare `any` is reported too.
-`map EXPR, LIST` and `grep EXPR, LIST` alias `$_` as the block forms do, so
-their expression counts as a block.
 
 These do not alias `$_`, and are not list functions here: `sort` and
 `reduce`, which set `$a` and `$b`; `apply` of List::MoreUtils, and
@@ -360,10 +382,30 @@ A copy of a block without the parts that `topic_owned_in` finds.
 my @owned = topic_owned_in( $node, \%list_functions );
 ```
 
-The parts of a node where `$_` is not the caller's: a `foreach` with no loop
-variable, a statement with a postfix `for`, the block of a list function, and
-an inner sub.  The list functions are those of the core's `list_funcs` unless
+The parts of a node where `$_` is not the caller's: the blocks of a
+`foreach` with no loop variable, the part of a statement before a postfix
+`for`, the block of a list function, the expression of `map EXPR, LIST` and
+`grep EXPR, LIST`, and an inner sub.  The list of a loop or of a list
+function is the caller's, because perl evaluates it before it aliases `$_`.
+The list functions are those of the core's `list_funcs` unless
 `\%list_functions` names others.
+
+### expression\_of
+
+```perl
+my @parts = expression_of($elem);
+```
+
+The parts of the expression of `map EXPR, LIST` or `grep EXPR, LIST`, when
+`$elem` is its `map` or `grep`, up to the comma before the list.  None for
+the block form, or for any other word.
+
+### is\_sub\_header
+
+Whether an element is one of those that [PPI](https://metacpan.org/pod/PPI) puts between the word
+`sub` of an anonymous sub and its block: a signature or a prototype, which it
+gives as a [PPI::Token::Prototype](https://metacpan.org/pod/PPI%3A%3AToken%3A%3APrototype), and the `:` and [PPI::Token::Attribute](https://metacpan.org/pod/PPI%3A%3AToken%3A%3AAttribute)
+of each attribute, with a signature after them as a [PPI::Structure::List](https://metacpan.org/pod/PPI%3A%3AStructure%3A%3AList).
 
 ### mutates\_topic
 
