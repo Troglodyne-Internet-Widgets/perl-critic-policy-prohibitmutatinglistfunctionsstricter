@@ -19,6 +19,12 @@ A block is reported when it changes C<$_> itself, as the core policy reports,
 or when it calls a sub that changes C<$_> without making it its own.  The edges
 are the ways a sub can change C<$_>, and the ways it can have a C<$_> of its own.
 
+With C<report_unresolved_calls>, a block is also reported when it calls a sub or
+method that the policy cannot read, and with C<report_postfix_for_calls>, so is
+a statement with a postfix C<for>.  The edges there are what counts as a call,
+which list functions alias C<$_>, where C<$_> belongs to some other construct
+inside the block, and where a C<local $_> covers a call.
+
 =cut
 
 use Test::More;
@@ -108,6 +114,167 @@ $check_table->(
     'a local of another variable'  => [ 1, $TRIM . q{my @t = map { local $/; trim(); $_ } @lines;} ],
 );
 
+# report_unresolved_calls and report_postfix_for_calls, which are off unless a
+# profile turns them on.
+my $ALIASED_PROFILE = "[ControlStructures::ProhibitMutatingListFunctionsStricter]\nreport_unresolved_calls = 1\nreport_postfix_for_calls = 1\n";
+my $aliased         = Perl::Critic->new( -profile => \$ALIASED_PROFILE, -only => 1, -severity => 1 );
+
+my $check_aliased = sub {
+    my ( $label, %cases ) = @_;
+    foreach my $case ( sort keys %cases ) {
+        my ( $expected, $source ) = @{ $cases{$case} };
+        is( scalar $aliased->critique( \$source ), $expected, "$label: $case" ) or diag $source;
+    }
+    return;
+};
+
+$check_table->(
+    'off by default',
+    'a sub defined nowhere'       => [ 0, q{my @r = map { f($_) } @x;} ],
+    'a method'                    => [ 0, q{my @r = grep { $_->is_ok } @x;} ],
+    'map EXPR'                    => [ 0, q{my @r = map f($_), @x;} ],
+    'a bare list function'        => [ 0, $TRIM . q{my $r = any { trim() } @lines;} ],
+    'a postfix for of a method'   => [ 0, q{$_->save for @objects;} ],
+    'a postfix for of a sub here' => [ 0, $TRIM . q{trim() for @lines;} ],
+);
+
+# On perl 5.44, a callee that assigns to $_ changed the elements of each of
+# these, and of none of the list functions that are not reported.
+$check_aliased->(
+    'a call that cannot be read, in a list function block',
+    'a sub'                                             => [ 1, q{my @r = map { f($_) } @x;} ],
+    'a sub without parens'                              => [ 1, q{my @r = map { f } @x;} ],
+    'a qualified sub'                                   => [ 1, q{my @r = map { Some::Where::f($_) } @x;} ],
+    'a method of $_'                                    => [ 1, q{my @r = grep { $_->is_ok } @x;} ],
+    'a class method'                                    => [ 1, q{my @r = map { Some::Class->new($_) } @x;} ],
+    'a dynamic method'                                  => [ 1, q{my @r = map { $o->$name($_) } @x;} ],
+    'a code reference'                                  => [ 1, q{my @r = map { $code->($_) } @x;} ],
+    'a code reference in a hash'                        => [ 1, q{my @r = map { $dispatch{$_}->() } @x;} ],
+    'an ampersand cast'                                 => [ 1, q{my @r = map { &$code } @x;} ],
+    'an ampersand sub'                                  => [ 1, q{my @r = map { &f } @x;} ],
+    'a constant, which is a sub'                        => [ 1, q{my @r = map { $_ * PI } @x;} ],
+    'in a condition'                                    => [ 1, q{my @r = grep { f($_) && $_ } @x;} ],
+    'in a statement modifier'                           => [ 1, q{my @r = map { $n++ if f(); $_ } @x;} ],
+    'in a nested for my loop'                           => [ 1, q{my @r = map { for my $y (@y) { f($y) } $_ } @x;} ],
+    'in the list of a for my loop'                      => [ 1, q{my @r = map { for my $y ( f() ) { } $_ } @x;} ],
+    'in a nested if block'                              => [ 1, q{my @r = map { if ($_) { f() } $_ } @x;} ],
+    'the argument of a builtin'                         => [ 1, q{my @r = map { lc f($_) } @x;} ],
+    'two calls, once'                                   => [ 1, q{my @r = map { f($_) . g($_) } @x;} ],
+    'a copy is not a fix'                               => [ 1, q{my @r = map { my $y = $_; f($y) } @x;} ],
+    'a method named like a sub'                         => [ 1, $TRIM . q{my @r = map { $_->trim } @lines;} ],
+    'map EXPR'                                          => [ 1, q{my @r = map f($_), @x;} ],
+    'grep EXPR'                                         => [ 1, q{my @r = grep f($_), @x;} ],
+    'List::Util::first'                                 => [ 1, q{my $r = List::Util::first { f($_) } @x;} ],
+    'first, imported'                                   => [ 1, q{my $r = first { f($_) } @x;} ],
+    'any, imported'                                     => [ 1, q{my $r = any { f($_) } @x;} ],
+    'all, imported'                                     => [ 1, q{my $r = all { f($_) } @x;} ],
+    'none, imported'                                    => [ 1, q{my $r = none { f($_) } @x;} ],
+    'notall, imported'                                  => [ 1, q{my $r = notall { f($_) } @x;} ],
+    'List::MoreUtils::firstval'                         => [ 1, q{my $r = List::MoreUtils::firstval { f($_) } @x;} ],
+    'List::SomeUtils::part'                             => [ 1, q{my @r = List::SomeUtils::part { f($_) } @x;} ],
+    'firstidx, imported'                                => [ 1, q{my $r = firstidx { f($_) } @x;} ],
+    'insert_after, imported'                            => [ 1, q{insert_after { f($_) } $v => @x;} ],
+    'max_by, imported'                                  => [ 1, q{my $r = max_by { f($_) } @x;} ],
+    'List::UtilsBy::min_by'                             => [ 1, q{my $r = List::UtilsBy::min_by { f($_) } @x;} ],
+    'a call before the local'                           => [ 1, q{my @r = map { f(); local ($_) = $_; g() } @x;} ],
+    'a call in the local'                               => [ 1, q{my @r = map { local ($_) = f($_); $_ } @x;} ],
+    'a local in an inner block'                         => [ 1, q{my @r = map { if ($y) { local $_ = 1 } f() } @x;} ],
+    'a local of another variable'                       => [ 1, q{my @r = map { local $/; f() } @x;} ],
+    'a sub here that changes $_, and one of none, once' => [ 1, $TRIM . q{my @r = map { trim(); f() } @lines;} ],
+    'a bare list function, through a sub here'          => [ 1, $TRIM . q{my $r = any { trim() } @lines;} ],
+    'a change in a bare list function'                  => [ 1, q{my $r = any { s/x// } @lines;} ],
+    'a sub here that changes $_, in map EXPR'           => [ 1, $TRIM . q{my @r = map trim(), @lines;} ],
+);
+
+$check_aliased->(
+    'a call that can be read, or not while $_ is an alias',
+    'builtins'                                        => [ 0, q{my @r = map { lc } grep { defined && length } @x;} ],
+    'a builtin through CORE::'                        => [ 0, q{my @r = map { CORE::lc($_) } @x;} ],
+    'no call at all'                                  => [ 0, q{my @r = map { $_ * 2 } @x;} ],
+    'a hash key'                                      => [ 0, q{my @r = map { $h{key} } @x;} ],
+    'a fat comma key'                                 => [ 0, q{my @r = map { { name => $_ } } @x;} ],
+    'a subscript after an arrow'                      => [ 0, q{my @r = map { $_->{name} } @x;} ],
+    'a method of UNIVERSAL'                           => [ 0, q{my @r = grep { $_->isa('Some::Class') && $_->can('m') } @x;} ],
+    'local ($_) = $_ first'                           => [ 0, q{my @r = map { local ($_) = $_; f() } @x;} ],
+    'a copy and local $_'                             => [ 0, q{my @r = map { my $y = $_; local $_; f($y) } @x;} ],
+    'a sub here that reads $_'                        => [ 0, q{sub f { return /x/ } my @r = map { f($_) } @x;} ],
+    'a sub here, defined later'                       => [ 0, q{my @r = map { f($_) } @x; sub f { return 1 }} ],
+    'a qualified sub here'                            => [ 0, q{package Here; sub f { return 1 } my @r = map { Here::f($_) } @x;} ],
+    'a lexical sub'                                   => [ 0, q{my sub f { return 1 } my @r = map { f($_) } @x;} ],
+    'in an anonymous sub'                             => [ 0, q{my @r = map { my $s = $_; sub { f($s) } } @x;} ],
+    'in an inner topic loop'                          => [ 0, q{my @r = map { for (@y) { f() } $_ } @x;} ],
+    'in the list, outside'                            => [ 0, q{my @r = map { $_ } f(@x);} ],
+    'the list of map EXPR'                            => [ 0, q{my @r = map lc, f(@x);} ],
+    'map EXPR of a builtin'                           => [ 0, q{my @r = map lc($_), @x;} ],
+    'sort, which does not set $_'                     => [ 0, q{my @r = sort { f($a) <=> f($b) } @x;} ],
+    'reduce, which sets $a and $b'                    => [ 0, q{my $r = reduce { f($a, $b) } @x;} ],
+    'sort_by, which copies'                           => [ 0, q{my @r = sort_by { f($_) } @x;} ],
+    'apply, which copies'                             => [ 0, q{my @r = apply { f($_) } @x;} ],
+    'insert_after_string'                             => [ 0, q{insert_after_string 'a', $v => @x;} ],
+    'a sub named like a list function, with no block' => [ 0, q{my $r = first(@x);} ],
+    'a call outside any block'                        => [ 0, q{f($_);} ],
+);
+
+$check_aliased->(
+    'a call in a statement with a postfix for',
+    'a sub of none'              => [ 1, q{f() for @x;} ],
+    'foreach'                    => [ 1, q{f() foreach @x;} ],
+    'a method of $_'             => [ 1, q{$_->save for @objects;} ],
+    'the argument of a builtin'  => [ 1, q{push @r, $_->name for @objects;} ],
+    'a sub here that changes $_' => [ 1, $TRIM . q{trim() for @lines;} ],
+    'a do block'                 => [ 1, q{do { f() } for @x;} ],
+    'inside a list function'     => [ 1, q{my @r = map { f() for @y; $_ } @x;} ],
+    'a local is no cover'        => [ 1, q{do { local ($_) = $_; f() } for @x;} ],
+);
+
+$check_aliased->(
+    'a postfix for with no such call, or another statement',
+    'builtins'                 => [ 0, q{print for @x;} ],
+    'a substitution'           => [ 0, q{s/\s+\z// for @x;} ],
+    'chomp'                    => [ 0, q{chomp for @x;} ],
+    'a sub here that reads $_' => [ 0, q{sub f { return /x/ } f() for @x;} ],
+    'a method of UNIVERSAL'    => [ 0, q{print $_->isa('Some::Class') for @x;} ],
+    'a call in the list'       => [ 0, q{print for f(@x);} ],
+    'a postfix if'             => [ 0, q{f() if $x;} ],
+    'a postfix while'          => [ 0, q{f() while $x;} ],
+    'a block for, no name'     => [ 0, q{for (@x) { f() }} ],
+    'a block for my'           => [ 0, q{for my $y (@x) { f($y) }} ],
+    'a C-style for'            => [ 0, q{for ( my $i = 0; $i < 9; $i++ ) { f($i) }} ],
+);
+
+$check_aliased->(
+    'each construct reports its own calls once',
+    'a map in a map'            => [ 2, q{my @r = map { g(); map { f() } @y } @x;} ],
+    'a map in a postfix for'    => [ 1, q{print map { f() } @y for @x;} ],
+    'a postfix for, then a map' => [ 2, q{f() for @x; my @r = map { g() } @x;} ],
+);
+
+my ($first) = $aliased->critique( \qq{my \@r = map {\n    lc \$_;\n    f(\$_);\n} \@x;\n} );
+is( $first ? $first->line_number : undef, 3, 'a call that cannot be read is reported on its own line' );
+
+my %explains = (
+    q{my @r = map { f($_) } @x;} => q{local ($_) = $_;},
+    q{f() for @x;}               => q{for my},
+);
+foreach my $source ( sort keys %explains ) {
+    my ($violation) = $aliased->critique( \$source );
+    my $explanation = $violation ? $violation->explanation : q{};
+    ok( index( $explanation, $explains{$source} ) >= 0, "the explanation of $source says $explains{$source}" ) or diag $explanation;
+}
+
+my $allow_profile = $ALIASED_PROFILE . "allow_calls = f Some::g name\n";
+my $allowing      = Perl::Critic->new( -profile => \$allow_profile, -only => 1, -severity => 1 );
+foreach my $source ( q{my @r = map { f($_) } @x;}, q{my @r = map { Some::g($_) } @x;}, q{my @r = map { $_->name } @x;}, q{$_->name for @x;} ) {
+    is( scalar $allowing->critique( \$source ), 0, "a name in allow_calls: $source" );
+}
+is( scalar $allowing->critique( \q{my @r = map { g($_) } @x;} ),              1, 'allow_calls names Some::g, which is not g' );
+is( scalar $allowing->critique( \( $TRIM . q{my @r = map { trim() } @x;} ) ), 1, 'allow_calls does not cover a sub that changes $_' );
+
+my $funcs_profile = $ALIASED_PROFILE . "add_list_funcs = each_item\n";
+my $funcs         = Perl::Critic->new( -profile => \$funcs_profile, -only => 1, -severity => 1 );
+is( scalar $funcs->critique( \q{each_item { f($_) } @x;} ),   1, 'a function in add_list_funcs' );
+is( scalar $funcs->critique( \q{my @r = map { f($_) } @x;} ), 1, 'and the default list functions as well' );
+
 # A sub in one file of a distribution, and calls of it in another.  Through
 # Perl::Critic::Distribution, which needs files on disk under lib/.
 {
@@ -122,6 +289,16 @@ $check_table->(
         'lib/Some/Same.pm'  => "package Some;\nsub tidy { my \@t = map { trim(); \$_ } \@_; return \@t }\n1;\n",
         'lib/Some/Other.pm' => "package Some::Other;\nsub one { my \@t = map { Some::trim(); \$_ } \@_; return \@t }\nsub two { my \@t = map { trim(); \$_ } \@_; return \@t }\n1;\n",
         'lib/Some/Reads.pm' => "package Some::Reads;\nsub one { my \@t = grep { Some::has_x() } \@_; return \@t }\n1;\n",
+        'lib/Some/Calls.pm' => join(
+            q{},
+            "package Some::Calls;\n",
+            "sub one { my \@t = map { Some::has_x(); \$_ } \@_; return \@t }\n",
+            "sub two { my \@t = map { elsewhere(); \$_ } \@_; return \@t }\n",
+            "sub three { my \@t = map { has_x(); \$_ } \@_; return \@t }\n",
+            "sub four { Some::has_x() for \@_; return }\n",
+            "sub five { Some::trim() for \@_; return }\n",
+            "1;\n"
+        ),
     );
     foreach my $name ( keys %files ) {
         open( my $fh, '>', "$root/$name" ) or die "$root/$name: $!";
@@ -130,13 +307,17 @@ $check_table->(
     }
 
     my $found = sub {
-        my ($file) = @_;
-        return [ map { $_->line_number } $critic->critique("$root/$file") ];
+        my ( $file, $by ) = @_;
+        return [ map { $_->line_number } ( $by // $critic )->critique("$root/$file") ];
     };
 
     is_deeply( $found->('lib/Some/Same.pm'),  [2], 'another file: a bare call in the package of the sub' );
     is_deeply( $found->('lib/Some/Other.pm'), [2], 'another file: a qualified call, and not a bare one from another package, whose import is not known' );
     is_deeply( $found->('lib/Some/Reads.pm'), [],  'another file: a sub that only reads $_' );
+    is_deeply( $found->('lib/Some/Calls.pm'), [],  'another file: no call is reported by default' );
+
+    is_deeply( $found->( 'lib/Some/Calls.pm', $aliased ), [ 3, 4, 6 ], 'another file, with both reports: a sub of none, a bare call from another package, and a postfix for of a sub that changes $_, but not one that only reads it' );
+    is_deeply( $found->( 'lib/Some/Other.pm', $aliased ), [ 2, 3 ], 'another file, with both reports: a sub that changes $_ once, and a bare call from another package as a call that cannot be read' );
 }
 
 done_testing;

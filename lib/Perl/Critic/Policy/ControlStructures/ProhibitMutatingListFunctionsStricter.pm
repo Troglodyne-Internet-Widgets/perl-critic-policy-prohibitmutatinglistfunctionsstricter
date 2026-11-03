@@ -11,7 +11,7 @@ use List::Util                 qw{any first};
 use Scalar::Util               ();
 use Perl::Critic::Distribution ();
 use Perl::Critic::Document     ();
-use Perl::Critic::Utils        qw{ :severities is_function_call first_arg };
+use Perl::Critic::Utils        qw{ :severities is_function_call is_method_call is_perl_builtin first_arg };
 
 use parent qw{Perl::Critic::Policy::ControlStructures::ProhibitMutatingListFunctions};
 
@@ -29,6 +29,10 @@ that changes C<$_>.  It cannot see a block that calls a sub that changes it:
 This policy reports everything that the core policy reports, and that call.
 Enable it in place of the core policy, not beside it, or each direct case is
 reported twice.
+
+Two more reports are off by default.  One is a call in the block to a sub or
+method that this policy cannot read, L</Calls that this policy cannot read>.
+The other is a call in a statement with a postfix C<for>, L</A postfix for>.
 
 =head2 What changes $_
 
@@ -88,24 +92,183 @@ C<Variables::RequireInitializationForLocalVars> reports the first.
 A change to C<$_> in the block itself, after the C<local>, is still reported.
 It is the core policy's test, and that test does not read the C<local>.
 
+=head2 Calls that this policy cannot read
+
+Off unless C<report_unresolved_calls> turns it on.
+
+The rules above can judge only a sub whose body they can read.  A method, a
+code reference, or a sub of another distribution can change C<$_> just the
+same, and the commonest case is a C<while (<$fh>)> in some helper of another
+module:
+
+    sub first_line {
+        my ($file) = @_;
+        open my $fh, '<', $file or die "$file: $!";
+        while (<$fh>) { last }     # assigns each line to $_
+        return $_;
+    }
+
+    my @heads = map { first_line($_) } @files;
+    # @files now holds the first line of each file, or undef for an empty one
+
+With C<report_unresolved_calls>, a call in the block of a list function to a
+callee that this policy cannot read is reported, before any C<local $_> at the
+top of the block.  The fix is the one in L</A local $_ in the block>:
+
+    my @heads = map { local ($_) = $_; first_line($_) } @files;    # OK!
+
+A copy, such as C<my $file = $_;>, is no fix, because the callee still writes
+C<$_>, which is still the element.
+
+These are calls that cannot be read:
+
+    f($_)                     # a sub defined in no file of the distribution
+    Some::Where::f($_)        # the same, by its full name
+    $_->is_ok                 # a method
+    Some::Class->new($_)      # a class method
+    $o->$name                 # a method by its name in a variable
+    $code->($_)               # a code reference
+    &$code  &f                # with an ampersand
+    PI                        # a constant is a sub too
+
+These are not calls that cannot be read:
+
+    lc  CORE::lc($_)          # a builtin
+    trim()                    # a sub that this policy reads, as above
+    $_->isa('Some::Class')    # a method named in allow_calls
+
+A sub is read when it is found as L</A sub that changes $_> finds it: by its
+name in the same file, or by its full name in the distribution.  So a bare call
+from another package, whose import is not known, cannot be read, and is
+reported.  A method is never read, because the method that runs can be another
+sub of the same name.
+
+The list functions are those of C<list_funcs> and C<add_list_funcs>, and also
+these, with or without the package.  On perl 5.44, a callee that assigns to
+C<$_> changed the elements of each of them:
+
+    map grep
+    List::Util       first any all none notall
+    List::MoreUtils  any all none notall true false firstidx first_index
+    List::SomeUtils  lastidx last_index firstval first_value lastval
+                     last_value firstres first_result lastres last_result
+                     onlyidx only_index onlyval only_value onlyres
+                     only_result indexes after after_incl before
+                     before_incl part insert_after
+    List::UtilsBy    max_by min_by
+
+The core's C<list_funcs> names only the full names of the functions of CPAN,
+and code calls them by the name that it imported.  With
+C<report_unresolved_calls>, every report of this policy uses this longer list,
+so a change to C<$_> in the block of a bare C<any> is reported too.
+C<map EXPR, LIST> and C<grep EXPR, LIST> alias C<$_> as the block forms do, so
+their expression counts as a block.
+
+These do not alias C<$_>, and are not list functions here: C<sort> and
+C<reduce>, which set C<$a> and C<$b>; C<apply> of List::MoreUtils, and
+C<sort_by>, C<uniq_by> and the other functions of List::UtilsBy, which give the
+block a copy.  C<insert_after_string>, which the core lists, takes no block.
+
+In the block, a call does not count where C<$_> belongs to another construct:
+in the places that L</A sub that changes $_> lists, which are reported on
+their own or run later.
+
+=head2 A postfix for
+
+Off unless C<report_postfix_for_calls> turns it on.
+
+A statement with a postfix C<for> makes C<$_> an alias to each element, as a
+list function does.  It has no block to put a C<local> in, and it cannot name
+its variable.  With C<report_postfix_for_calls>, the part of the statement
+before the C<for> is reported when it calls a sub that changes C<$_>, by
+L</A sub that changes $_>, or a call that cannot be read, by
+L</Calls that this policy cannot read>.  Write it as a block C<for> with a
+lexical variable, which does not make C<$_> an alias at all:
+
+    $_->load for @documents;                  # reported
+    for my $doc (@documents) { $doc->load }   # OK!
+
+    print for @lines;                         # OK! a builtin
+    s/\s+\z// for @lines;                     # OK! a change on purpose
+    sub has_x { return /x/ } has_x() for @x;  # OK! read, and it does not change $_
+
+A block C<foreach> with no loop variable makes C<$_> an alias as well, but it
+can name one.  L<Perl::Critic::Policy::Variables::ProhibitTopicIterator>, in
+Perl-Critic-Grape, reports each of them, and this policy does not.
+
+=head2 Caveats
+
+A call that perl makes for the code, and that the code does not spell, is not
+seen: an overloaded operator, a tied variable, a C<DESTROY>, C<sort SUBNAME>,
+C<require> and C<do FILE>.
+
+Some lists are not the caller's data, and a call there is reported all the
+same.  C<keys> returns copies, so a write to C<$_> in C<for (keys %h)> changes
+nothing that lasts.  A write to an element of a literal list, as in
+C<for (1, 2)>, dies with "Modification of a read-only value attempted".
+C<values> does return aliases.
+
 =head1 CONFIGURATION
 
 The C<list_funcs> and C<add_list_funcs> of
 L<Perl::Critic::Policy::ControlStructures::ProhibitMutatingListFunctions>.
 
+C<report_unresolved_calls> reports a call in a list function block that this
+policy cannot read, as L</Calls that this policy cannot read> says.  Off by
+default.
+
+C<report_postfix_for_calls> reports a call in a statement with a postfix
+C<for>, as L</A postfix for> says.  Off by default.
+
+C<allow_calls> names subs and methods that those two take as not writing C<$_>.
+A sub is matched as it is written in the call, so C<Some::g> does not allow
+C<g>, and a method by its name alone.  It does not cover a sub that this policy
+reads and finds to change C<$_>.  The default is C<can DOES isa VERSION>, the
+methods of C<UNIVERSAL>, which perl provides.  A list replaces the default, so
+name them too to keep them.
+
+    [ControlStructures::ProhibitMutatingListFunctionsStricter]
+    report_unresolved_calls  = 1
+    report_postfix_for_calls = 1
+    allow_calls = can DOES isa VERSION to_string id name
+
+    my @r = map { f($_) } @x;                      # reported
+    my @r = map { $_->id } @x;                     # OK! in allow_calls
+    my @r = map { local ($_) = $_; f($_) } @x;     # OK!
+    $_->save for @objects;                         # reported
+    for my $object (@objects) { $object->save }    # OK!
+
 =cut
 
-Readonly::Scalar my $CORE        => 'Perl::Critic::Policy::ControlStructures::ProhibitMutatingListFunctions';
-Readonly::Scalar my $DESC        => q{Don't modify $_ in list functions};
-Readonly::Scalar my $DESC_CALLED => q{A sub that modifies $_ is called in a list function};
-Readonly::Scalar my $EXPL        => [114];
+Readonly::Scalar my $CORE            => 'Perl::Critic::Policy::ControlStructures::ProhibitMutatingListFunctions';
+Readonly::Scalar my $DESC            => q{Don't modify $_ in list functions};
+Readonly::Scalar my $DESC_CALLED     => q{A sub that modifies $_ is called in a list function};
+Readonly::Scalar my $EXPL            => [114];
+Readonly::Scalar my $DESC_UNRESOLVED => q{A sub or method that may modify $_ is called in a list function};
+Readonly::Scalar my $EXPL_UNRESOLVED => q{Say "local ($_) = $_;" before the first call, so that a callee that writes $_ writes a copy};
+Readonly::Scalar my $DESC_POSTFIX    => q{A sub or method that may modify $_ is called in a statement with a postfix for};
+Readonly::Scalar my $EXPL_POSTFIX    => q{Write a block "for my $x (...) { ... }" instead, so that $_ is not the element};
+
+# The functions that make $_ an alias to each element, for report_unresolved_calls.
+Readonly::Array my @ALIASING_FUNCS => (
+    qw{ map grep },
+    map { ( $_, "List::Util::$_" ) } qw{ first any all none notall },
+    map { ( $_, "List::MoreUtils::$_", "List::SomeUtils::$_" ) } qw{
+      any all none notall true false firstidx first_index lastidx last_index
+      firstval first_value lastval last_value firstres first_result lastres
+      last_result onlyidx only_index onlyval only_value onlyres only_result
+      indexes after after_incl before before_incl part insert_after
+    },
+    map { ( $_, "List::UtilsBy::$_" ) } qw{ max_by min_by },
+);
+Readonly::Hash my %EXPR_FORM => map { $_ => 1 } qw{ map grep };
 
 Readonly::Hash my %CHOPS         => map { $_ => 1 } qw{ chop chomp };
 Readonly::Hash my %LOOP          => map { $_ => 1 } qw{ for foreach };
 Readonly::Hash my %LIST_FUNCTION => map { $_ => 1 } split m/\s+/xs, ( first { $_->{name} eq 'list_funcs' } $CORE->supported_parameters )->{default_string};
 
 # Change it when what the collector returns changes shape.
-Readonly::Scalar my $DATA_FORMAT => 1;
+Readonly::Scalar my $DATA_FORMAT => 2;
 
 # The definition of what changes $_ is the core policy's, in a sub that it does
 # not export.  Said at load, not at the first file.
@@ -122,6 +285,36 @@ my $bare_name = sub {
 
 =head3 supported_parameters
 
+Those of the core policy, and C<report_unresolved_calls>,
+C<report_postfix_for_calls> and C<allow_calls>.
+
+=cut
+
+sub supported_parameters {
+    my ($class) = @_;
+    return (
+        $class->SUPER::supported_parameters(),
+        {
+            name           => 'report_unresolved_calls',
+            description    => q{Report a call in a list function block that this policy cannot read},
+            default_string => '0',
+            behavior       => 'boolean',
+        },
+        {
+            name           => 'report_postfix_for_calls',
+            description    => q{Report a call in a statement with a postfix for},
+            default_string => '0',
+            behavior       => 'boolean',
+        },
+        {
+            name           => 'allow_calls',
+            description    => q{Subs and methods that those two reports take as not writing $_},
+            default_string => q{can DOES isa VERSION},
+            behavior       => 'string list',
+        },
+    );
+}
+
 =head3 default_severity
 
 =head3 default_themes
@@ -134,23 +327,34 @@ Those of the core policy.
 
 What the core policy does, and registers what this policy needs from each file
 of a distribution with L<Perl::Critic::Distribution>: the package subs that
-change C<$_>.  A lexical sub is left out, because no other file can call it.
+change C<$_>, and all the package subs.  A lexical sub is left out, because no
+other file can call it.
 
 =cut
 
 sub initialize_if_enabled {
     my ( $self, $config ) = @_;
 
+    my $enabled = $self->SUPER::initialize_if_enabled($config);
+
+    # The list functions as the core policy configured them, from its
+    # list_funcs and add_list_funcs, and those that report_unresolved_calls adds.
+    $self->{_block_funcs} = { %{ $self->{_all_list_funcs} }, $self->{_report_unresolved_calls} ? ( map { $_ => 1 } @ALIASING_FUNCS ) : () };
+
     Perl::Critic::Distribution->register(
         name    => __PACKAGE__,
         version => join( q{/}, $DATA_FORMAT, $CORE->VERSION, Perl::Critic::Distribution->stamp(__FILE__) // q{} ),
         collect => sub {
-            my ($ppi) = @_;
-            my $doc = Perl::Critic::Document->new( -source => $ppi );
-            return { mutating_subs => [ map { $_->[1] } grep { !$_->[0]->type } mutating_subs_in( $doc, packages_in($doc) ) ] };
+            my ($ppi)    = @_;
+            my $doc      = Perl::Critic::Document->new( -source => $ppi );
+            my $packages = packages_in($doc);
+            return {
+                mutating_subs => [ map { $_->[1] } grep { !$_->[0]->type } mutating_subs_in( $doc, $packages ) ],
+                subs          => [ map { $_->[1] } grep { !$_->[0]->type } subs_in( $doc, $packages ) ],
+            };
         },
     );
-    return $self->SUPER::initialize_if_enabled($config);
+    return $enabled;
 }
 
 =head3 violates
@@ -163,31 +367,111 @@ sub violates {
     my @core = $self->SUPER::violates( $elem, $doc );
     return @core if @core;
 
-    # The list functions as the core policy configured them, from its
-    # list_funcs and add_list_funcs.
-    return if !$self->{_all_list_funcs}{$elem} || !is_function_call($elem);
-    my $block = first_arg($elem);
-    return if !$block || !$block->isa('PPI::Structure::Block');
+    if ( $self->{_report_postfix_for_calls} && ( my $statement = postfix_statement($elem) ) ) {
+        my $known = $self->known_subs($doc);
+        my $call  = $self->first_call( $known, 1, [ topic_owned_in( $statement, $self->{_block_funcs} ) ], grep { precedes( $_, $elem ) } $statement->schildren ) or return;
+        return $self->violation( $DESC_POSTFIX, $EXPL_POSTFIX, $call );
+    }
 
-    return $self->violation( $DESC, $EXPL, $elem ) if chops_topic($block);
+    return if !$self->{_block_funcs}{$elem} || !is_function_call($elem);
+    my $arg = first_arg($elem) or return;
+
+    my @aliased;
+    if ( $arg->isa('PPI::Structure::Block') ) {
+        return $self->violation( $DESC, $EXPL, $elem ) if chops_topic($arg) || ( !$self->{_all_list_funcs}{$elem} && $core_side_effect->( $arg, $doc ) );
+        @aliased = aliased_statements($arg);
+    }
+    elsif ( $self->{_report_unresolved_calls} && $EXPR_FORM{$elem} ) {
+        for ( my $part = $arg; $part && !( $part->isa('PPI::Token::Operator') && $part->content eq q{,} ); $part = $part->snext_sibling ) {
+            push @aliased, $part;
+        }
+    }
+    else {
+        return;
+    }
 
     my $known = $self->known_subs($doc);
-    foreach my $word ( map { @{ $_->find('PPI::Token::Word') || [] } } aliased_statements($block) ) {
-        my $name = $word->content;
-        next if !$known->{local}{$name} && !$known->{bare}{ $bare_name->($name) };
-        next if !is_function_call($word);
+    foreach my $word ( map { $_->isa('PPI::Node') ? @{ $_->find('PPI::Token::Word') || [] } : $_ } @aliased ) {
+        next                                                  if !$word->isa('PPI::Token::Word') || !is_function_call($word);
+        return $self->violation( $DESC_CALLED, $EXPL, $elem ) if calls_sub_in( $word, $word->content, $known->{mutating}, $known->{packages} );
+    }
 
-        my $full = index( $name, '::' ) >= 0 ? $name : package_at( $word, $known->{packages} ) . "::$name";
-        return $self->violation( $DESC_CALLED, $EXPL, $elem ) if $known->{local}{$name} || $known->{remote}{$full};
+    return if !$self->{_report_unresolved_calls};
+    my $owner = $arg->isa('PPI::Structure::Block') ? $arg : $elem->statement;
+    my $call  = $self->first_call( $known, 0, [ topic_owned_in( $owner, $self->{_block_funcs} ) ], @aliased ) or return;
+    return $self->violation( $DESC_UNRESOLVED, $EXPL_UNRESOLVED, $call );
+}
+
+=head3 first_call
+
+    my $call = $self->first_call( $known, $mutating_too, \@owned, @elements );
+
+The first token of C<@elements>, or inside them, that calls a sub or method
+that this policy cannot read, and is not in C<allow_calls>.  With
+C<$mutating_too>, a call of a sub that changes C<$_> counts as well.  Nothing
+inside an element of C<@owned>, from C<topic_owned_in>, counts.  C<$known> is
+from C<known_subs>.
+
+=cut
+
+sub first_call {
+    my ( $self, $known, $mutating_too, $owned, @elements ) = @_;
+
+    my %owned = map { Scalar::Util::refaddr($_) => 1 } @$owned;
+    foreach my $token ( map { $_->isa('PPI::Node') ? $_->tokens : $_ } @elements ) {
+        next          if !$token->significant || is_inside( $token, \%owned );
+        return $token if $self->is_unsafe_call( $token, $known, $mutating_too );
     }
     return;
 }
 
+=head3 is_unsafe_call
+
+    my $unsafe = $self->is_unsafe_call( $token, $known, $mutating_too );
+
+Whether a token calls a sub or method that C<first_call> counts: one that this
+policy cannot read and C<allow_calls> does not name, or, with
+C<$mutating_too>, a sub that changes C<$_>.  A builtin is not a call.
+
+=cut
+
+sub is_unsafe_call {
+    my ( $self, $token, $known, $mutating_too ) = @_;
+
+    my $name;
+    if ( $token->isa('PPI::Token::Word') ) {
+        $name = $token->content;
+        return !$self->{_allow_calls}{$name} if is_method_call($token);
+        return                               if !is_function_call($token) || $self->{_block_funcs}{$name};
+        ( my $core = $name ) =~ s/\ACORE::(?:GLOBAL::)?//xms;
+        return if is_perl_builtin($core);
+    }
+    elsif ( $token->isa('PPI::Token::Symbol') && $token->raw_type eq q{&} ) {
+        $name = substr $token->content, 1;
+    }
+    elsif ( $token->isa('PPI::Token::Cast') ) {
+        return $token->content eq q{&};
+    }
+    elsif ( $token->isa('PPI::Token::Operator') && $token->content eq q{->} ) {
+        my $next = $token->snext_sibling;
+        return $next && ( $next->isa('PPI::Structure::List') || $next->isa('PPI::Token::Symbol') );
+    }
+    else {
+        return;
+    }
+
+    return $mutating_too && calls_sub_in( $token, $name, $known->{mutating}, $known->{packages} ) if calls_sub_in( $token, $name, $known->{defined}, $known->{packages} );
+    return !$self->{_allow_calls}{$name};
+}
+
 =head3 known_subs
 
-The subs that change C<$_>, for a document: those of the document by their
-name, and those of the rest of its distribution by their full name.  Worked
-out once for each document, since C<violates> is called once for each word.
+The subs of a document and of the rest of its distribution, for
+C<calls_sub_in>: under C<mutating> those that change C<$_>, and under
+C<defined> all of them.  Each holds the names in the document under C<local>,
+the full names under C<remote>, and the part after the last C<::> of each full
+name under C<bare>.  Worked out once for each document, since C<violates> is
+called once for each word.
 
 =cut
 
@@ -200,18 +484,23 @@ sub known_subs {
     return $last->{subs} if $last && Scalar::Util::refaddr( $last->{doc} ) == Scalar::Util::refaddr($doc);
 
     my $packages = packages_in($doc);
-    my %subs     = ( packages => $packages, local => { map { ( $_->[0]->name => 1 ) } mutating_subs_in( $doc, $packages ) } );
+    my @here     = subs_in( $doc, $packages );
+    my %subs     = (
+        packages => $packages,
+        mutating => { local => { map { ( $_->[0]->name => 1 ) } mutating_subs_in( $doc, $packages ) }, remote => {} },
+        defined  => { local => { map { ( $_->[0]->name => 1 ) } @here },                               remote => { map { ( $_->[1] => 1 ) } @here } },
+    );
 
     my $filename = $doc->filename;
     if ( my $dist = defined $filename && Perl::Critic::Distribution->for_file($filename) ) {
-        $subs{remote} = {
-            map {
-                map { ( $_ => 1 ) }
-                  @{ $_->{mutating_subs} }
-            } values %{ $dist->collected(__PACKAGE__) }
-        };
+        foreach my $file ( values %{ $dist->collected(__PACKAGE__) } ) {
+            $subs{mutating}{remote}{$_} = 1 for @{ $file->{mutating_subs} };
+            $subs{defined}{remote}{$_}  = 1 for @{ $file->{subs} };
+        }
     }
-    $subs{bare} = { map { ( $bare_name->($_) => 1 ) } keys %{ $subs{remote} // {} } };
+    foreach my $set ( @subs{qw{ mutating defined }} ) {
+        $set->{bare} = { map { ( $bare_name->($_) => 1 ) } keys %{ $set->{remote} } };
+    }
 
     $self->{_known} = { doc => $doc, subs => \%subs };
     return \%subs;
@@ -220,6 +509,91 @@ sub known_subs {
 =head2 FUNCTIONS
 
 The steps of C<violates>, for its tests.
+
+=head3 precedes
+
+    my $earlier = precedes( $elem, $mark );
+
+Whether C<$elem> starts before C<$mark> in the document.
+
+=cut
+
+sub precedes {
+    my ( $elem, $mark ) = @_;
+    my ( $line,  $col )  = @{ $elem->location }[ 0, 1 ];
+    my ( $mline, $mcol ) = @{ $mark->location }[ 0, 1 ];
+    return $line < $mline || ( $line == $mline && $col < $mcol );
+}
+
+=head3 is_inside
+
+    my $inside = is_inside( $elem, \%by_address );
+
+Whether C<$elem>, or a node around it, is in a hash keyed by the address of
+each element.
+
+=cut
+
+sub is_inside {
+    my ( $elem, $owned ) = @_;
+    for ( my $up = $elem; $up; $up = $up->parent ) {
+        return 1 if $owned->{ Scalar::Util::refaddr($up) };
+    }
+    return;
+}
+
+=head3 calls_sub_in
+
+    my $found = calls_sub_in( $elem, $name, $known->{mutating}, $known->{packages} );
+
+Whether a call of C<$name> at C<$elem> runs a sub of a set from C<known_subs>:
+one of the document by its name, or one of the distribution by its full name,
+where a bare name is in the package of C<$elem>.
+
+=cut
+
+sub calls_sub_in {
+    my ( $elem, $name, $set, $packages ) = @_;
+
+    return 1 if $set->{local}{$name};
+    return   if !$set->{bare}{ $bare_name->($name) };
+    my $full = index( $name, '::' ) >= 0 ? $name : package_at( $elem, $packages ) . "::$name";
+    return $set->{remote}{$full};
+}
+
+=head3 postfix_statement
+
+The statement of C<$elem>, when C<$elem> is the C<for> or C<foreach> of a
+postfix C<for>.
+
+=cut
+
+sub postfix_statement {
+    my ($elem) = @_;
+
+    return if !$LOOP{ $elem->content };
+    my $statement = $elem->parent;
+    return if !$statement || !$statement->isa('PPI::Statement') || $statement->isa('PPI::Statement::Compound');
+    return if $statement->schild(0) == $elem;
+    return $statement;
+}
+
+=head3 subs_in
+
+    my @found = subs_in( $doc, packages_in($doc) );
+
+Each sub of a L<Perl::Critic::Document> that has a body, as a pair of its
+statement and its full name.
+
+=cut
+
+sub subs_in {
+    my ( $doc, $packages ) = @_;
+    return map {
+        my $name = $_->name;
+        [ $_, index( $name, '::' ) >= 0 ? $name : package_at( $_, $packages ) . "::$name" ]
+    } grep { $_->block } @{ $doc->find('PPI::Statement::Sub') || [] };
+}
 
 =head3 mutating_subs_in
 
@@ -234,25 +608,22 @@ sub mutating_subs_in {
     my ( $doc, $packages ) = @_;
 
     my @found;
-    foreach my $sub ( @{ $doc->find('PPI::Statement::Sub') || [] } ) {
-        my $block = $sub->block or next;
+    foreach my $found ( subs_in( $doc, $packages ) ) {
+        my $block = $found->[0]->block;
         next if any {
             $_->type eq 'local' && any { $_ eq q{$_} }
               $_->variables
         } @{ $block->find('PPI::Statement::Variable') || [] };
         next if !mutates_topic( own_topic_removed($block), $doc );
 
-        my $name = $sub->name;
-        push @found, [ $sub, index( $name, '::' ) >= 0 ? $name : package_at( $sub, $packages ) . "::$name" ];
+        push @found, $found;
     }
     return @found;
 }
 
 =head3 own_topic_removed
 
-A copy of a block without the parts where C<$_> is not the caller's: a
-C<foreach> with no loop variable, a statement with a postfix C<for>, the block
-of a list function, and an inner sub.
+A copy of a block without the parts that C<topic_owned_in> finds.
 
 =cut
 
@@ -260,26 +631,44 @@ sub own_topic_removed {
     my ($block) = @_;
 
     my $copy = $block->clone;
-    my @gone;
-    foreach my $statement ( @{ $copy->find('PPI::Statement') || [] } ) {
-        my @parts = $statement->schildren;
-        if ( $statement->isa('PPI::Statement::Compound') ) {
-            push @gone, $statement if $LOOP{ $parts[0] // q{} } && $parts[1] && $parts[1]->isa('PPI::Structure::List');
-        }
-        elsif ( $statement->isa('PPI::Statement::Sub') || any { $_->isa('PPI::Token::Word') && $LOOP{ $_->content } } @parts[ 1 .. $#parts ] ) {
-            push @gone, $statement;
-        }
-    }
-    foreach my $word ( @{ $copy->find('PPI::Token::Word') || [] } ) {
-        my $next = $word->snext_sibling;
-        push @gone, $next if $next && $next->isa('PPI::Structure::Block') && ( $word->content eq 'sub' || $LIST_FUNCTION{ $word->content } );
-    }
 
     # An element inside one that is already gone is gone with it.
-    foreach my $elem (@gone) {
+    foreach my $elem ( topic_owned_in($copy) ) {
         $elem->delete if $elem->top == $copy;
     }
     return $copy;
+}
+
+=head3 topic_owned_in
+
+    my @owned = topic_owned_in( $node, \%list_functions );
+
+The parts of a node where C<$_> is not the caller's: a C<foreach> with no loop
+variable, a statement with a postfix C<for>, the block of a list function, and
+an inner sub.  The list functions are those of the core's C<list_funcs> unless
+C<\%list_functions> names others.
+
+=cut
+
+sub topic_owned_in {
+    my ( $node, $list_functions ) = @_;
+    $list_functions //= \%LIST_FUNCTION;
+
+    my @owned;
+    foreach my $statement ( @{ $node->find('PPI::Statement') || [] } ) {
+        my @parts = $statement->schildren;
+        if ( $statement->isa('PPI::Statement::Compound') ) {
+            push @owned, $statement if $LOOP{ $parts[0] // q{} } && $parts[1] && $parts[1]->isa('PPI::Structure::List');
+        }
+        elsif ( $statement->isa('PPI::Statement::Sub') || any { $_->isa('PPI::Token::Word') && $LOOP{ $_->content } } @parts[ 1 .. $#parts ] ) {
+            push @owned, $statement;
+        }
+    }
+    foreach my $word ( @{ $node->find('PPI::Token::Word') || [] } ) {
+        my $next = $word->snext_sibling;
+        push @owned, $next if $next && $next->isa('PPI::Structure::Block') && ( $word->content eq 'sub' || $list_functions->{ $word->content } );
+    }
+    return @owned;
 }
 
 =head3 mutates_topic
