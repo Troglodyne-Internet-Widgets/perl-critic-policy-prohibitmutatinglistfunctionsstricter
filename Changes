@@ -1,4 +1,18 @@
 Revision history for Perl-Critic-Policy-ControlStructures-ProhibitMutatingListFunctionsStricter
 
+0.002 2026-11-03 TEODESIAN
+    - A sub called after a local $_ at the top of a list function block is
+      no longer reported, since it changes the block's copy of $_.
+    - New report_unresolved_calls, off by default: report a call in a list
+      function block, or in map EXPR and grep EXPR, to a sub or method that
+      the policy cannot read.  With it, the bare names of the List::Util,
+      List::MoreUtils, List::SomeUtils and List::UtilsBy functions that
+      alias $_ count as list functions too.
+    - New report_postfix_for_calls, off by default: report a call in a
+      statement with a postfix for, to a sub that changes $_ or one that the
+      policy cannot read.
+    - New allow_calls, for those two: callees taken as not writing $_.  The
+      default is the methods of UNIVERSAL.
+
 0.001 2026-10-09 TEODESIAN
     - Initial Release
