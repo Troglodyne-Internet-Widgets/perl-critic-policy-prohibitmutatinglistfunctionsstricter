@@ -75,6 +75,16 @@ sub of the same name.
 
 Only one call deep: a sub that calls a sub that changes C<$_> is not reported.
 
+The same places count in the block that calls it.  A call there does not
+count, because it changes another list, or runs later, or not at all:
+
+    my @t = map { my @z = map { trim(); $_ } @y; $_ } @lines;  # the inner map only
+    my @t = map { for (@y) { trim() } $_ } @lines;             # OK! changes @y
+    my @t = map { my $c = sub ($y) { trim() }; $_ } @lines;    # OK! not called here
+
+A C<for my $x> loop names its own variable and leaves C<$_> as the element, so
+a call in its body still counts.
+
 =head2 A local $_ in the block
 
 A C<local $_> at the top level of the block gives the block a C<$_> of its
@@ -393,14 +403,16 @@ sub violates {
     }
 
     my $known = $self->known_subs($doc);
+    my $owner = $arg->isa('PPI::Structure::Block') ? $arg : $elem->statement;
+    my @owned = topic_owned_in( $owner, $self->{_block_funcs} );
+    my %owned = map { Scalar::Util::refaddr($_) => 1 } @owned;
     foreach my $word ( map { $_->isa('PPI::Node') ? @{ $_->find('PPI::Token::Word') || [] } : $_ } @aliased ) {
-        next                                                  if !$word->isa('PPI::Token::Word') || !is_function_call($word);
+        next                                                  if !$word->isa('PPI::Token::Word') || !is_function_call($word) || is_inside( $word, \%owned );
         return $self->violation( $DESC_CALLED, $EXPL, $elem ) if calls_sub_in( $word, $word->content, $known->{mutating}, $known->{packages} );
     }
 
     return if !$self->{_report_unresolved_calls};
-    my $owner = $arg->isa('PPI::Structure::Block') ? $arg : $elem->statement;
-    my $call  = $self->first_call( $known, 0, [ topic_owned_in( $owner, $self->{_block_funcs} ) ], @aliased ) or return;
+    my $call = $self->first_call( $known, 0, \@owned, @aliased ) or return;
     return $self->violation( $DESC_UNRESOLVED, $EXPL_UNRESOLVED, $call );
 }
 

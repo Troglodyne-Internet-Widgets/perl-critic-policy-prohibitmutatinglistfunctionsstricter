@@ -158,6 +158,29 @@ $check_table->(
     'a local of another variable'  => [ 1, $TRIM . q{my @t = map { local $/; trim(); $_ } @lines;} ],
 );
 
+# On perl 5.44 each case with 0 leaves @lines as it was, and each with 1
+# changes it, or changes the list of the inner block that is reported.
+$check_table->(
+    'a sub that changes $_, called where $_ is not the caller\'s',
+    'in an anonymous sub'                       => [ 0, $TRIM . q{my @t = map { my $c = sub { trim() }; $_ } @lines;} ],
+    'in an anonymous sub with a signature'      => [ 0, q{use 5.040; } . $TRIM . q{my @t = map { my $c = sub ($y) { trim() }; $_ } @lines;} ],
+    'in an anonymous sub with a prototype'      => [ 0, $TRIM . q{my @t = map { my $c = sub ($) { trim() }; $_ } @lines;} ],
+    'in an anonymous sub with an attribute'     => [ 0, $TRIM . q{my @t = map { my $c = sub :lvalue { trim() }; $_ } @lines;} ],
+    'in an anonymous sub, attribute, signature' => [ 0, q{use 5.040; } . $TRIM . q{my @t = map { my $c = sub :lvalue ($y) { trim() }; $_ } @lines;} ],
+    'in a named sub'                            => [ 0, $TRIM . q{my @t = map { sub g { trim() } $_ } @lines;} ],
+    'in a named sub with a signature'           => [ 0, q{use 5.040; } . $TRIM . q{my @t = map { sub g ($y) { trim() } $_ } @lines;} ],
+    'in a lexical sub with a signature'         => [ 0, q{use 5.040; } . $TRIM . q{my @t = map { my sub g ($y) { trim() } $_ } @lines;} ],
+    'in the body of a foreach, no variable'     => [ 0, $TRIM . q{my @t = map { for (@y) { trim() } $_ } @lines;} ],
+    'before a postfix for'                      => [ 0, $TRIM . q{my @t = map { trim() for @y; $_ } @lines;} ],
+    'in a nested map, reported once'            => [ 1, $TRIM . q{my @t = map { my @z = map { trim(); $_ } @y; $_ } @lines;} ],
+    'in a nested grep, reported once'           => [ 1, $TRIM . q{my @t = map { my @z = grep { trim() } @y; $_ } @lines;} ],
+    'in a nested List::Util::first, once'       => [ 1, $TRIM . q{my @t = map { my $z = List::Util::first { trim() } @y; $_ } @lines;} ],
+    'in the body of a for my'                   => [ 1, $TRIM . q{my @t = map { for my $x (@y) { trim() } $_ } @lines;} ],
+    'in the list of a foreach, no variable'     => [ 1, $TRIM . q{my @t = map { for ( trim() ) { 1 } $_ } @lines;} ],
+    'in the list of a postfix for'              => [ 1, $TRIM . q{my @t = map { my @q; push @q, $_ for trim(); $_ } @lines;} ],
+    'in the list of a nested map'               => [ 1, $TRIM . q{my @t = map { my @z = map { $_ } trim(); $_ } @lines;} ],
+);
+
 # report_unresolved_calls and report_postfix_for_calls, which are off unless a
 # profile turns them on.
 my $ALIASED_PROFILE = "[ControlStructures::ProhibitMutatingListFunctionsStricter]\nreport_unresolved_calls = 1\nreport_postfix_for_calls = 1\n";
