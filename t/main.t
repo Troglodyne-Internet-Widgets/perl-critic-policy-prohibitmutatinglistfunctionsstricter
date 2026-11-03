@@ -84,6 +84,10 @@ $check_table->(
     'without parens'         => [ 1, $TRIM . q{my @t = map { trim; $_ } @lines;} ],
     'twice in one block'     => [ 1, $TRIM . q{my @t = map { trim(); trim(); $_ } @lines;} ],
     'in two blocks'          => [ 2, $TRIM . q{my @t = map { trim(); $_ } @lines; my @u = grep { trim() } @lines;} ],
+
+    # The list of a loop is evaluated before $_ is aliased to its elements.
+    'in the list of its foreach'     => [ 1, q{sub t { foreach ( s/x// ) { 1 } return } my @t = map { t(); $_ } @lines;} ],
+    'in the list of its postfix for' => [ 1, q{sub t { my @q; push @q, $_ for s/x//; return } my @t = map { t(); $_ } @lines;} ],
 );
 
 $check_table->(
@@ -197,6 +201,8 @@ $check_aliased->(
     'in a statement modifier'                           => [ 1, q{my @r = map { $n++ if f(); $_ } @x;} ],
     'in a nested for my loop'                           => [ 1, q{my @r = map { for my $y (@y) { f($y) } $_ } @x;} ],
     'in the list of a for my loop'                      => [ 1, q{my @r = map { for my $y ( f() ) { } $_ } @x;} ],
+    'in the list of an inner topic loop'                => [ 1, q{my @r = map { for ( f() ) { } $_ } @x;} ],
+    'in the list of an inner postfix for'               => [ 1, q{my @r = map { push @q, $_ for f(); $_ } @x;} ],
     'in a nested if block'                              => [ 1, q{my @r = map { if ($_) { f() } $_ } @x;} ],
     'the argument of a builtin'                         => [ 1, q{my @r = map { lc f($_) } @x;} ],
     'two calls, once'                                   => [ 1, q{my @r = map { f($_) . g($_) } @x;} ],

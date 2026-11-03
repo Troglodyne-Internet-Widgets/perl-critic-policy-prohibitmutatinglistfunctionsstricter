@@ -53,8 +53,9 @@ caller's:
 
 =over
 
-=item * the body of a C<foreach> with no loop variable, and a statement with a
-postfix C<for>,
+=item * the body of a C<foreach> with no loop variable, and the part of a
+statement before a postfix C<for>, but not the list of either, which perl
+evaluates before it aliases C<$_>,
 
 =item * the block of a list function inside the sub,
 
@@ -644,10 +645,12 @@ sub own_topic_removed {
 
     my @owned = topic_owned_in( $node, \%list_functions );
 
-The parts of a node where C<$_> is not the caller's: a C<foreach> with no loop
-variable, a statement with a postfix C<for>, the block of a list function, and
-an inner sub.  The list functions are those of the core's C<list_funcs> unless
-C<\%list_functions> names others.
+The parts of a node where C<$_> is not the caller's: the blocks of a
+C<foreach> with no loop variable, the part of a statement before a postfix
+C<for>, the block of a list function, and an inner sub.  The list of a loop is
+the caller's, because perl evaluates it before it aliases C<$_>.  The list
+functions are those of the core's C<list_funcs> unless C<\%list_functions>
+names others.
 
 =cut
 
@@ -659,10 +662,13 @@ sub topic_owned_in {
     foreach my $statement ( @{ $node->find('PPI::Statement') || [] } ) {
         my @parts = $statement->schildren;
         if ( $statement->isa('PPI::Statement::Compound') ) {
-            push @owned, $statement if $LOOP{ $parts[0] // q{} } && $parts[1] && $parts[1]->isa('PPI::Structure::List');
+            push @owned, grep { $_->isa('PPI::Structure::Block') } @parts[ 2 .. $#parts ] if $LOOP{ $parts[0] // q{} } && $parts[1] && $parts[1]->isa('PPI::Structure::List');
         }
-        elsif ( $statement->isa('PPI::Statement::Sub') || any { $_->isa('PPI::Token::Word') && $LOOP{ $_->content } } @parts[ 1 .. $#parts ] ) {
+        elsif ( $statement->isa('PPI::Statement::Sub') ) {
             push @owned, $statement;
+        }
+        elsif ( my $loop = first { $parts[$_]->isa('PPI::Token::Word') && $LOOP{ $parts[$_]->content } } 1 .. $#parts ) {
+            push @owned, @parts[ 0 .. $loop - 1 ];
         }
     }
     foreach my $word ( @{ $node->find('PPI::Token::Word') || [] } ) {
