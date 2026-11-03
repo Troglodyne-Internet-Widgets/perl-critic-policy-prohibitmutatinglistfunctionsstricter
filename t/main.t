@@ -95,6 +95,19 @@ $check_table->(
     'a sub defined nowhere'             => [ 0, q{my @t = map { trim(); $_ } @lines;} ],
 );
 
+# A local $_ gives the block a $_ of its own, so a sub called after it changes
+# a copy.  On perl 5.44 each case with 0 leaves @lines as it was.
+$check_table->(
+    'a local $_ at the top of the block',
+    'local ($_) = $_ first'        => [ 0, $TRIM . q{my @t = map { local ($_) = $_; trim(); $_ } @lines;} ],
+    'a copy, then local $_'        => [ 0, $TRIM . q{my @t = map { my $y = $_; local $_; trim(); $y } @lines;} ],
+    'local after other statements' => [ 0, $TRIM . q{my @t = map { my $n = 1; local ($_) = $_; trim(); $n } @lines;} ],
+    'the call before the local'    => [ 1, $TRIM . q{my @t = map { trim(); local ($_) = $_; $_ } @lines;} ],
+    'the call in the local'        => [ 1, $TRIM . q{my @t = map { local ($_) = trim(); $_ } @lines;} ],
+    'a local in an inner block'    => [ 1, $TRIM . q{my @t = map { if ($x) { local $_ = 1 } trim(); $_ } @lines;} ],
+    'a local of another variable'  => [ 1, $TRIM . q{my @t = map { local $/; trim(); $_ } @lines;} ],
+);
+
 # A sub in one file of a distribution, and calls of it in another.  Through
 # Perl::Critic::Distribution, which needs files on disk under lib/.
 {

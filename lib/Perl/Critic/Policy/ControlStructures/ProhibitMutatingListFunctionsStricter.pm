@@ -69,6 +69,25 @@ sub of the same name.
 
 Only one call deep: a sub that calls a sub that changes C<$_> is not reported.
 
+=head2 A local $_ in the block
+
+A C<local $_> at the top level of the block gives the block a C<$_> of its
+own.  A sub that is called after it changes that copy, and not the list, so
+those calls do not count.  Say it before the first call:
+
+    my @tidy = map { local ($_) = $_; trim(); $_ } @lines;    # OK!
+
+A call in the C<local> statement itself still counts:
+C<local ($_) = trim()> calls C<trim> before C<$_> is localized.  So does a
+call before it, and a C<local $_> inside an inner block covers nothing.
+
+C<local $_;> and C<local $_ = $_;> work as well.  But the second is reported
+as a change to C<$_> by the core policy, so by this one, and
+C<Variables::RequireInitializationForLocalVars> reports the first.
+
+A change to C<$_> in the block itself, after the C<local>, is still reported.
+It is the core policy's test, and that test does not read the C<local>.
+
 =head1 CONFIGURATION
 
 The C<list_funcs> and C<add_list_funcs> of
@@ -153,7 +172,7 @@ sub violates {
     return $self->violation( $DESC, $EXPL, $elem ) if chops_topic($block);
 
     my $known = $self->known_subs($doc);
-    foreach my $word ( @{ $block->find('PPI::Token::Word') || [] } ) {
+    foreach my $word ( map { @{ $_->find('PPI::Token::Word') || [] } } aliased_statements($block) ) {
         my $name = $word->content;
         next if !$known->{local}{$name} && !$known->{bare}{ $bare_name->($name) };
         next if !is_function_call($word);
@@ -275,6 +294,27 @@ sub mutates_topic {
     my ( $block, $doc ) = @_;
     return 1 if $core_side_effect->( $block, $doc );
     return chops_topic($block);
+}
+
+=head3 aliased_statements
+
+    my @statements = aliased_statements($block);
+
+The statements at the top level of a block, up to and with the first that
+says C<local $_>.  The statements after it run with a C<$_> of the block's
+own.
+
+=cut
+
+sub aliased_statements {
+    my ($block) = @_;
+
+    my @statements;
+    foreach my $statement ( $block->schildren ) {
+        push @statements, $statement;
+        last if $statement->isa('PPI::Statement::Variable') && $statement->type eq 'local' && any { $_ eq q{$_} } $statement->variables;
+    }
+    return @statements;
 }
 
 =head3 chops_topic
