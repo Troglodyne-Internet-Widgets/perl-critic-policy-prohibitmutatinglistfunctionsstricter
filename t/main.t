@@ -101,6 +101,46 @@ $check_table->(
     'a sub defined nowhere'             => [ 0, q{my @t = map { trim(); $_ } @lines;} ],
 );
 
+# The forms of an inner sub that PPI parses differently, each of which
+# is_sub_header or PPI::Statement::Sub must find.  On perl 5.44, under
+# use 5.040, no case here with 0 changes @lines.
+my %INNER_SUB = (
+    'an anonymous sub with a signature'      => q{my $f = sub ($y) { s/x// };},
+    'an anonymous sub with two parameters'   => q{my $f = sub ($y, $z = 1) { s/x// };},
+    'an anonymous sub with a prototype'      => q{my $f = sub ($) { s/x// };},
+    'an anonymous sub with an attribute'     => q{my $f = sub :lvalue { s/x// };},
+    'an anonymous sub with :prototype'       => q{my $f = sub :prototype($) { s/x// };},
+    'an anonymous sub, attribute, signature' => q{my $f = sub :lvalue ($y) { s/x// };},
+    'an anonymous sub returned'              => q{return sub ($y) { s/x// };},
+    'an anonymous sub as an argument'        => q{g(sub ($y) { s/x// });},
+    'a named sub with a signature'           => q{sub g ($y) { s/x// }},
+    'a named sub with an attribute'          => q{sub g :lvalue { s/x// }},
+    'a lexical sub with a signature'         => q{my sub g ($y) { s/x// }},
+);
+my %PRELUDE = (
+    'no feature'                => q{},
+    q{use feature 'signatures'} => q{use feature 'signatures'; },
+    'use 5.040'                 => q{use 5.040; },
+);
+foreach my $prelude ( sort keys %PRELUDE ) {
+    $check_table->(
+        "a sub whose inner sub changes \$_, $prelude",
+        map {
+            (
+                "$_, not called"          => [ 0, $PRELUDE{$prelude} . "sub t { $INNER_SUB{$_} return 1 } my \@t = map { t(); \$_ } \@lines;" ],
+                "$_, and the sub's own s" => [ 1, $PRELUDE{$prelude} . "sub t { $INNER_SUB{$_} s/x//; return 1 } my \@t = map { t(); \$_ } \@lines;" ],
+            )
+        } keys %INNER_SUB
+    );
+    $check_table->(
+        "a sub that changes \$_ and carries a signature or attribute, $prelude",
+        'a signature'                    => [ 1, $PRELUDE{$prelude} . q{sub t ($y) { s/x//; return 1 } my @t = map { t(1); $_ } @lines;} ],
+        'a prototype'                    => [ 1, $PRELUDE{$prelude} . q{sub t ($) { s/x//; return 1 } my @t = map { t(1); $_ } @lines;} ],
+        'an attribute'                   => [ 1, $PRELUDE{$prelude} . q{sub t :lvalue { s/x//; my $z } my @t = map { t(); $_ } @lines;} ],
+        'a lexical sub with a signature' => [ 1, $PRELUDE{$prelude} . q{my sub t ($y) { s/x//; return 1 } my @t = map { t(1); $_ } @lines;} ],
+    );
+}
+
 # A local $_ gives the block a $_ of its own, so a sub called after it changes
 # a copy.  On perl 5.44 each case with 0 leaves @lines as it was.
 $check_table->(
@@ -184,6 +224,11 @@ $check_aliased->(
     'a bare list function, through a sub here'          => [ 1, $TRIM . q{my $r = any { trim() } @lines;} ],
     'a change in a bare list function'                  => [ 1, q{my $r = any { s/x// } @lines;} ],
     'a sub here that changes $_, in map EXPR'           => [ 1, $TRIM . q{my @r = map trim(), @lines;} ],
+    'beside an anonymous sub with a signature'          => [ 1, q{use 5.040; my @r = map { my $c = sub ($y) { 1 }; f($_) } @x;} ],
+
+    # Perl reads sub : at the start of a statement as the label sub:, and the
+    # rest as a call, so f runs here, and PPI reads it as perl does.
+    'sub :lvalue, first in its statement' => [ 1, q{my @r = map { my $s = $_; sub :lvalue { f($s) } } @x;} ],
 );
 
 $check_aliased->(
@@ -202,6 +247,11 @@ $check_aliased->(
     'a qualified sub here'                            => [ 0, q{package Here; sub f { return 1 } my @r = map { Here::f($_) } @x;} ],
     'a lexical sub'                                   => [ 0, q{my sub f { return 1 } my @r = map { f($_) } @x;} ],
     'in an anonymous sub'                             => [ 0, q{my @r = map { my $s = $_; sub { f($s) } } @x;} ],
+    'in an anonymous sub with a signature'            => [ 0, q{use 5.040; my @r = map { my $s = $_; sub ($y) { f($s) } } @x;} ],
+    'in an anonymous sub with a prototype'            => [ 0, q{my @r = map { my $s = $_; sub ($) { f($s) } } @x;} ],
+    'in an anonymous sub with an attribute'           => [ 0, q{my @r = map { my $s = $_; my $c = sub :lvalue { f($s) }; $c } @x;} ],
+    'in an anonymous sub, attribute, signature'       => [ 0, q{use 5.040; my @r = map { my $s = $_; my $c = sub :lvalue ($y) { f($s) }; $c } @x;} ],
+    'in a named sub with a signature'                 => [ 0, q{use 5.040; my @r = map { sub g ($y) { f($y) } $_ } @x;} ],
     'in an inner topic loop'                          => [ 0, q{my @r = map { for (@y) { f() } $_ } @x;} ],
     'in the list, outside'                            => [ 0, q{my @r = map { $_ } f(@x);} ],
     'the list of map EXPR'                            => [ 0, q{my @r = map lc, f(@x);} ],
@@ -229,17 +279,18 @@ $check_aliased->(
 
 $check_aliased->(
     'a postfix for with no such call, or another statement',
-    'builtins'                 => [ 0, q{print for @x;} ],
-    'a substitution'           => [ 0, q{s/\s+\z// for @x;} ],
-    'chomp'                    => [ 0, q{chomp for @x;} ],
-    'a sub here that reads $_' => [ 0, q{sub f { return /x/ } f() for @x;} ],
-    'a method of UNIVERSAL'    => [ 0, q{print $_->isa('Some::Class') for @x;} ],
-    'a call in the list'       => [ 0, q{print for f(@x);} ],
-    'a postfix if'             => [ 0, q{f() if $x;} ],
-    'a postfix while'          => [ 0, q{f() while $x;} ],
-    'a block for, no name'     => [ 0, q{for (@x) { f() }} ],
-    'a block for my'           => [ 0, q{for my $y (@x) { f($y) }} ],
-    'a C-style for'            => [ 0, q{for ( my $i = 0; $i < 9; $i++ ) { f($i) }} ],
+    'builtins'                    => [ 0, q{print for @x;} ],
+    'a substitution'              => [ 0, q{s/\s+\z// for @x;} ],
+    'chomp'                       => [ 0, q{chomp for @x;} ],
+    'a sub here that reads $_'    => [ 0, q{sub f { return /x/ } f() for @x;} ],
+    'a method of UNIVERSAL'       => [ 0, q{print $_->isa('Some::Class') for @x;} ],
+    'a call in the list'          => [ 0, q{print for f(@x);} ],
+    'a postfix if'                => [ 0, q{f() if $x;} ],
+    'a postfix while'             => [ 0, q{f() while $x;} ],
+    'an anonymous sub, signature' => [ 0, q{use 5.040; push @r, sub ($y) { f($y) } for @x;} ],
+    'a block for, no name'        => [ 0, q{for (@x) { f() }} ],
+    'a block for my'              => [ 0, q{for my $y (@x) { f($y) }} ],
+    'a C-style for'               => [ 0, q{for ( my $i = 0; $i < 9; $i++ ) { f($i) }} ],
 );
 
 $check_aliased->(

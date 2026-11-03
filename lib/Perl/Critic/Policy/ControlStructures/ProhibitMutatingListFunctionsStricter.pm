@@ -58,7 +58,8 @@ postfix C<for>,
 
 =item * the block of a list function inside the sub,
 
-=item * an inner sub, named or anonymous.
+=item * an inner sub, named or anonymous, with or without a signature, a
+prototype or attributes.
 
 =back
 
@@ -666,9 +667,30 @@ sub topic_owned_in {
     }
     foreach my $word ( @{ $node->find('PPI::Token::Word') || [] } ) {
         my $next = $word->snext_sibling;
+        if ( $word->content eq 'sub' ) {
+            $next = $next->snext_sibling while $next && is_sub_header($next);
+        }
         push @owned, $next if $next && $next->isa('PPI::Structure::Block') && ( $word->content eq 'sub' || $list_functions->{ $word->content } );
     }
     return @owned;
+}
+
+=head3 is_sub_header
+
+Whether an element is one of those that L<PPI> puts between the word
+C<sub> of an anonymous sub and its block: a signature or a prototype, which it
+gives as a L<PPI::Token::Prototype>, and the C<:> and L<PPI::Token::Attribute>
+of each attribute, with a signature after them as a L<PPI::Structure::List>.
+
+=cut
+
+sub is_sub_header {
+    my ($elem) = @_;
+    return
+         $elem->isa('PPI::Token::Prototype')
+      || $elem->isa('PPI::Token::Attribute')
+      || $elem->isa('PPI::Structure::List')
+      || ( $elem->isa('PPI::Token::Operator') && $elem->content eq q{:} );
 }
 
 =head3 mutates_topic
