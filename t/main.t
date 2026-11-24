@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!perl
 use strict;
 use warnings FATAL => 'all';
 
@@ -205,7 +205,7 @@ my %EXPR_LINES = (
 );
 foreach my $case ( sort keys %EXPR_LINES ) {
     my ( $lines, $source ) = @{ $EXPR_LINES{$case} };
-    is_deeply( [ map { $_->line_number } $critic->critique( \$source ) ], $lines, "map EXPR, reported where its list changes: $case" ) or diag $source;
+    is_deeply( [ map { local ($_) = $_; $_->line_number } $critic->critique( \$source ) ], $lines, "map EXPR, reported where its list changes: $case" ) or diag $source;
 }
 
 # report_unresolved_calls and report_postfix_for_calls, which are off unless a
@@ -415,7 +415,7 @@ is( scalar $funcs->critique( \q{my @r = map { f($_) } @x;} ), 1, 'and the defaul
 
     my $found = sub {
         my ( $file, $by ) = @_;
-        return [ map { $_->line_number } ( $by // $critic )->critique("$root/$file") ];
+        return [ map { local ($_) = $_; $_->line_number } ( $by // $critic )->critique("$root/$file") ];
     };
 
     is_deeply( $found->('lib/Some/Same.pm'),  [2], 'another file: a bare call in the package of the sub' );

@@ -6,6 +6,7 @@ use strict;
 use warnings FATAL => 'all';
 use 5.014;
 use re '/aa';
+no autovivification;
 use Readonly;
 use List::Util                 qw{any first};
 use Scalar::Util               ();
@@ -368,8 +369,8 @@ sub initialize_if_enabled {
             my $doc      = Perl::Critic::Document->new( -source => $ppi );
             my $packages = packages_in($doc);
             return {
-                mutating_subs => [ map { $_->[1] } grep { !$_->[0]->type } mutating_subs_in( $doc, $packages ) ],
-                subs          => [ map { $_->[1] } grep { !$_->[0]->type } subs_in( $doc, $packages ) ],
+                mutating_subs => [ map { local ($_) = $_; $_->[1] } grep { local ($_) = $_; !$_->[0]->type } mutating_subs_in( $doc, $packages ) ],
+                subs          => [ map { local ($_) = $_; $_->[1] } grep { local ($_) = $_; !$_->[0]->type } subs_in( $doc, $packages ) ],
             };
         },
     );
@@ -388,7 +389,7 @@ sub violates {
 
     if ( $self->{_report_postfix_for_calls} && ( my $statement = postfix_statement($elem) ) ) {
         my $known = $self->known_subs($doc);
-        my $call  = $self->first_call( $known, 1, [ topic_owned_in( $statement, $self->{_block_funcs} ) ], grep { precedes( $_, $elem ) } $statement->schildren ) or return;
+        my $call  = $self->first_call( $known, 1, [ topic_owned_in( $statement, $self->{_block_funcs} ) ], grep { local ($_) = $_; precedes( $_, $elem ) } $statement->schildren ) or return;
         return $self->violation( $DESC_POSTFIX, $EXPL_POSTFIX, $call );
     }
 
@@ -403,9 +404,9 @@ sub violates {
     }
     elsif ( @aliased = expression_of($elem) ) {
         my $copy = PPI::Statement->new;
-        $copy->add_element( $_->clone ) for @aliased;
+        for my $part (@aliased) { $copy->add_element( $part->clone ) }
         return $self->violation( $DESC, $EXPL, $elem ) if mutates_topic( $copy, $doc );
-        %expression = map { Scalar::Util::refaddr($_) => 1 } @aliased;
+        %expression = map { local ($_) = $_; Scalar::Util::refaddr($_) => 1 } @aliased;
     }
     else {
         return;
@@ -415,11 +416,12 @@ sub violates {
     # finds the expression itself.
     my $known = $self->known_subs($doc);
     my $owner = $arg->isa('PPI::Structure::Block') ? $arg : $elem->statement;
-    my @owned = grep { !$expression{ Scalar::Util::refaddr($_) } } topic_owned_in( $owner, $self->{_block_funcs} );
-    my %owned = map  { Scalar::Util::refaddr($_) => 1 } @owned;
-    foreach my $word ( map { $_->isa('PPI::Node') ? @{ $_->find('PPI::Token::Word') || [] } : $_ } @aliased ) {
+    my @owned = grep { local ($_) = $_; !$expression{ Scalar::Util::refaddr($_) } } topic_owned_in( $owner, $self->{_block_funcs} );
+    my %owned = map  { local ($_) = $_; Scalar::Util::refaddr($_) => 1 } @owned;
+    my ( $mutating, $packages ) = @{$known}{qw{mutating packages}};
+    foreach my $word ( map { local ($_) = $_; $_->isa('PPI::Node') ? @{ $_->find('PPI::Token::Word') || [] } : $_ } @aliased ) {
         next                                                  if !$word->isa('PPI::Token::Word') || !is_function_call($word) || is_inside( $word, \%owned );
-        return $self->violation( $DESC_CALLED, $EXPL, $elem ) if calls_sub_in( $word, $word->content, $known->{mutating}, $known->{packages} );
+        return $self->violation( $DESC_CALLED, $EXPL, $elem ) if calls_sub_in( $word, $word->content, $mutating, $packages );
     }
 
     return if !$self->{_report_unresolved_calls};
@@ -442,8 +444,8 @@ from C<known_subs>.
 sub first_call {
     my ( $self, $known, $mutating_too, $owned, @elements ) = @_;
 
-    my %owned = map { Scalar::Util::refaddr($_) => 1 } @$owned;
-    foreach my $token ( map { $_->isa('PPI::Node') ? $_->tokens : $_ } @elements ) {
+    my %owned = map { local ($_) = $_; Scalar::Util::refaddr($_) => 1 } @$owned;
+    foreach my $token ( map { local ($_) = $_; $_->isa('PPI::Node') ? $_->tokens : $_ } @elements ) {
         next          if !$token->significant || is_inside( $token, \%owned );
         return $token if $self->is_unsafe_call( $token, $known, $mutating_too );
     }
@@ -468,7 +470,7 @@ sub is_unsafe_call {
         $name = $token->content;
         return !$self->{_allow_calls}{$name} if is_method_call($token);
         return                               if !is_function_call($token) || $self->{_block_funcs}{$name};
-        ( my $core = $name ) =~ s/\ACORE::(?:GLOBAL::)?//xms;
+        ( my $core = $name ) =~ s/\ACORE::(?:GLOBAL::)?//xs;
         return if is_perl_builtin($core);
     }
     elsif ( $token->isa('PPI::Token::Symbol') && $token->raw_type eq q{&} ) {
@@ -485,7 +487,8 @@ sub is_unsafe_call {
         return;
     }
 
-    return $mutating_too && calls_sub_in( $token, $name, $known->{mutating}, $known->{packages} ) if calls_sub_in( $token, $name, $known->{defined}, $known->{packages} );
+    my ( $defined, $mutating, $packages ) = @{$known}{qw{defined mutating packages}};
+    return $mutating_too && calls_sub_in( $token, $name, $mutating, $packages ) if calls_sub_in( $token, $name, $defined, $packages );
     return !$self->{_allow_calls}{$name};
 }
 
@@ -512,8 +515,8 @@ sub known_subs {
     my @here     = subs_in( $doc, $packages );
     my %subs     = (
         packages => $packages,
-        mutating => { local => { map { ( $_->[0]->name => 1 ) } mutating_subs_in( $doc, $packages ) }, remote => {} },
-        defined  => { local => { map { ( $_->[0]->name => 1 ) } @here },                               remote => { map { ( $_->[1] => 1 ) } @here } },
+        mutating => { local => { map { local ($_) = $_; ( $_->[0]->name => 1 ) } mutating_subs_in( $doc, $packages ) }, remote => {} },
+        defined  => { local => { map { local ($_) = $_; ( $_->[0]->name => 1 ) } @here }, remote => { map { ( $_->[1] => 1 ) } @here } },
     );
 
     my $filename = $doc->filename;
@@ -524,7 +527,7 @@ sub known_subs {
         }
     }
     foreach my $set ( @subs{qw{ mutating defined }} ) {
-        $set->{bare} = { map { ( $bare_name->($_) => 1 ) } keys %{ $set->{remote} } };
+        $set->{bare} = { map { local ($_) = $_; ( $bare_name->($_) => 1 ) } keys %{ $set->{remote} } };
     }
 
     $self->{_known} = { doc => $doc, subs => \%subs };
@@ -615,9 +618,10 @@ statement and its full name.
 sub subs_in {
     my ( $doc, $packages ) = @_;
     return map {
+        local ($_) = $_;
         my $name = $_->name;
         [ $_, index( $name, '::' ) >= 0 ? $name : package_at( $_, $packages ) . "::$name" ]
-    } grep { $_->block } @{ $doc->find('PPI::Statement::Sub') || [] };
+    } grep { local ($_) = $_; $_->block } @{ $doc->find('PPI::Statement::Sub') || [] };
 }
 
 =head3 mutating_subs_in
@@ -634,11 +638,9 @@ sub mutating_subs_in {
 
     my @found;
     foreach my $found ( subs_in( $doc, $packages ) ) {
-        my $block = $found->[0]->block;
-        next if any {
-            $_->type eq 'local' && any { $_ eq q{$_} }
-              $_->variables
-        } @{ $block->find('PPI::Statement::Variable') || [] };
+        my $block      = $found->[0]->block;
+        my @localizers = grep { local ($_) = $_; localizes_topic($_) } @{ $block->find('PPI::Statement::Variable') || [] };
+        next if @localizers;
         next if !mutates_topic( own_topic_removed($block), $doc );
 
         push @found, $found;
@@ -691,7 +693,7 @@ sub topic_owned_in {
         elsif ( $statement->isa('PPI::Statement::Sub') ) {
             push @owned, $statement;
         }
-        elsif ( my $loop = first { $parts[$_]->isa('PPI::Token::Word') && $LOOP{ $parts[$_]->content } } 1 .. $#parts ) {
+        elsif ( my ($loop) = grep { local ($_) = $_; $parts[$_]->isa('PPI::Token::Word') && $LOOP{ $parts[$_]->content } } 1 .. $#parts ) {
             push @owned, @parts[ 0 .. $loop - 1 ];
         }
     }
@@ -778,9 +780,21 @@ sub aliased_statements {
     my @statements;
     foreach my $statement ( $block->schildren ) {
         push @statements, $statement;
-        last if $statement->isa('PPI::Statement::Variable') && $statement->type eq 'local' && any { $_ eq q{$_} } $statement->variables;
+        last if localizes_topic($statement);
     }
     return @statements;
+}
+
+=head3 localizes_topic
+
+Whether a statement says C<local $_>.  It is not a call of a list function, so
+that its caller can say it inside the block of one.
+
+=cut
+
+sub localizes_topic {
+    my ($statement) = @_;
+    return $statement->isa('PPI::Statement::Variable') && $statement->type eq 'local' && any { $_ eq q{$_} } $statement->variables;
 }
 
 =head3 chops_topic
@@ -792,7 +806,8 @@ ends its statement, as C<chomp;>.
 
 sub chops_topic {
     my ($block) = @_;
-    return any {
+    return scalar grep {
+        local ($_) = $_;
         my $arg = first_arg($_);
         $CHOPS{ $_->content } && is_function_call($_) && ( !$arg || ( $arg->isa('PPI::Token::Structure') && $arg->content eq q{;} ) )
     } @{ $block->find('PPI::Token::Word') || [] };
